@@ -1,7 +1,45 @@
 DBIx/HA version 0.54
 ====================
 
-DBIx::HA is a High Availability module for DBI. It is implemented byoverloading the DBI connect, prepare and execute methods and canbe seamlessly used without code modification except for initialization.DBIx::HA also works seamlessly with Apache::DBI when available, andensures that cached database handles in the Apache::DBI module are properlyreleased when failing over.Features of DBIx::HA are:- multiple failoversShould a datasource become unavailable, queries are automatically sent tothe next available datasource in a user-configured datasource stack.All subsequent queries continue to hit the failover server untilreinitialized. This ensures that a failed datasource can be properly broughtback online before it is put back in service.- timeoutsDatabase calls are wrapped in user-configurable timeouts. Connect and executetimeouts are handled independently.- configurable retriesQueries can be retried n times before a datasource is considered failed.- callback functionA user-defined callback function can be called upon abnormal failure anddisconnection from a datasource in order to clean locally cached handles andperform other housekeeping tasks.- inter-process automatic failover under mod_perlFailover can be triggered for a single process or a set of processes at theapplication level. Specifically designed for Apache's multi-process model,if one mod_perl process triggers a failover, it is propagated to all othermod_perl processes using the same database handle.DBIx::HA was designed primarily for reliability and speed. Functionalitythat would compromise speed was not considered. This module has been testedextensively at very high loads in the Apache/mod_perl/Sybase environment.
+DBIx::HA is a High Availability module for DBI. It is implemented by
+overloading the DBI connect, prepare and execute methods and can
+be seamlessly used without code modification except for initialization.
+
+DBIx::HA also works seamlessly with Apache::DBI when available, and
+ensures that cached database handles in the Apache::DBI module are properly
+released when failing over.
+
+Features of DBIx::HA are:
+
+- multiple failovers
+Should a datasource become unavailable, queries are automatically sent to
+the next available datasource in a user-configured datasource stack.
+All subsequent queries continue to hit the failover server until
+reinitialized. This ensures that a failed datasource can be properly brought
+back online before it is put back in service.
+
+- timeouts
+Database calls are wrapped in user-configurable timeouts. Connect and execute
+timeouts are handled independently.
+
+- configurable retries
+Queries can be retried n times before a datasource is considered failed.
+
+- callback function
+A user-defined callback function can be called upon abnormal failure and
+disconnection from a datasource in order to clean locally cached handles and
+perform other housekeeping tasks.
+
+- inter-process automatic failover under mod_perl
+Failover can be triggered for a single process or a set of processes at the
+application level. Specifically designed for Apache's multi-process model,
+if one mod_perl process triggers a failover, it is propagated to all other
+mod_perl processes using the same database handle.
+
+
+DBIx::HA was designed primarily for reliability and speed. Functionality
+that would compromise speed was not considered. This module has been tested
+extensively at very high loads in the Apache/mod_perl/Sybase environment.
 
 INSTALLATION
 

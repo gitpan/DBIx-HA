@@ -18,7 +18,9 @@ use strict;
 use vars qw ( @ISA );
 @ISA = qw ( DBI );
 
-$VERSION = 0.54;
+BEGIN {
+	$DBIx::HA::VERSION = 0.55;
+}
 
 my $prefix = "$$ DBIx::HA:           "; 
 my $logdir;
@@ -421,36 +423,36 @@ DBIx::HA - High Availability package for DBI
 
 =head1 SYNOPSIS
 
-    use DBIx::HA;
+ use DBIx::HA;
 
-	$connect_attributes = {
-                                syb_flush_finish => 1,
-                                AutoCommit => 1,
-                                ChopBlanks => 1,
-                                PrintError => 0,
-                                RaiseError => 0,
-                                RootClass  => 'DBIx::HA'
-                        };
+ $connect_attributes = {
+         syb_flush_finish => 1,
+         AutoCommit => 1,
+         ChopBlanks => 1,
+         PrintError => 0,
+         RaiseError => 0,
+         RootClass  => 'DBIx::HA'
+         };
 
-	$DATABASE::conf{'test'} = {
-			max_retries     => 2,
-			db_stack => [
-				   [ 'dbi:Sybase:server=prod1;database=test', 'user1', 'password1', $connect_attributes ],
-				   [ 'dbi:Sybase:server=prod2;database=test', 'user2', 'password2', $connect_attributes ],
-				   [ 'dbi:Sybase:server=prod3;database=test', 'user3', 'password3', $connect_attributes ],
-						],
-			pingtimeout     => -1,
-			failoverlevel   => 'application',
-			connecttimeout  => 1,
-			executetimeout  => 8,
-			callback_function => \&MyCallbackFunction,
-	};
+ $DATABASE::conf{'test'} = {
+    max_retries => 2,
+    db_stack => [
+        [ 'dbi:Sybase:server=prod1;database=test', 'user1', 'password1', $connect_attributes ],
+        [ 'dbi:Sybase:server=prod2;database=test', 'user2', 'password2', $connect_attributes ],
+        [ 'dbi:Sybase:server=prod3;database=test', 'user3', 'password3', $connect_attributes ],
+        ],
+    pingtimeout     => -1,
+    failoverlevel   => 'application',
+    connecttimeout  => 1,
+    executetimeout  => 8,
+    callback_function => \&MyCallbackFunction,
+    };
 
-	DBIx::HA->initialize();
-    $dbh = DBIx::HA->connect('bizrate');
+ DBIx::HA->initialize();
+ $dbh = DBIx::HA->connect('test');
     
-    $sth = $dbh->prepare($statement);
-    $rv = $sth->execute;
+ $sth = $dbh->prepare($statement);
+ $rv = $sth->execute;
 
 =head1 DESCRIPTION
 
@@ -704,7 +706,7 @@ C<Apache::DBI> for ping timeouts and caching of database handles.
 
 =head1 AUTHOR
 
-Henri Asseily <henri@bizrate.com>
+Henri Asseily <henri@asseily.com>
 
 =head1 COPYRIGHT
 

@@ -4,3 +4,5 @@ Makefile.PL
 MANIFEST
 README
 META.yml                                Module meta-data (added by MakeMaker)
+t/base.t
+t/failover.t
