@@ -1,0 +1,9 @@
+Revision history for Perl extension DBIx::HA.
+
+0.54 Wed Jan 21 19:20:00 2004
+	- Prepped for first outside release.
+	- Added extensive POD.
+
+0.01  Wed Jan 21 19:20:00 2004
+	- original version; created by h2xs 1.22 with options
+		-AX -n DBIx::HA
