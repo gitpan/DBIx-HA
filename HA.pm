@@ -12,21 +12,24 @@ use 5.006000;
 use constant DBIx_HA_DEBUG => 0;
 use Data::Dumper;
 use DBI ();
-use Apache;
 use Exporter ();
 use strict;
 use vars qw ( @ISA );
 @ISA = qw ( DBI );
 
 BEGIN {
-	$DBIx::HA::VERSION = 0.55;
+	eval { require Apache };
+	unless ($@) { import Apache; };
+	$DBIx::HA::VERSION = 0.56;
 }
 
 my $prefix = "$$ DBIx::HA:           "; 
 my $logdir;
 
 sub initialize {
-	$Apache::DBI::DEBUG = $Apache::DBI::DEBUG = DBIx_HA_DEBUG;	# If we're debugging here, we should also debug Apache::DBI
+	if ($INC{'Apache.pm'}) {
+		$Apache::DBI::DEBUG = DBIx_HA_DEBUG;	# If we're debugging here, we should also debug Apache::DBI
+	}
 	if (DBIx_HA_DEBUG > 1) {
 		warn "$prefix in initialize:\n";
 		warn Dumper %DATABASE::conf;

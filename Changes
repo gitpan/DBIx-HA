@@ -1,5 +1,13 @@
 Revision history for Perl extension DBIx::HA.
 
+0.56 Wed Feb 04 12:02:00 2004
+	- Removed dependencies on Apache::DBI. There was no error
+	  under 5.8.1 but 5.8.0 wasn't passing tests. Apache::DBI
+	  will still be used if found.
+
+0.55 Fri Jan 30 12:42:00 2004
+	- Added test scripts
+
 0.54 Wed Jan 21 19:20:00 2004
 	- Prepped for first outside release.
 	- Added extensive POD.

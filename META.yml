@@ -1,6 +1,6 @@
 #XXXXXXX This is a prototype!!!  It will change in the future!!! XXXXX#
 name:         DBIx-HA
-version:      0.55
+version:      0.56
 version_from: HA.pm
 installdirs:  site
 requires:
