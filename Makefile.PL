@@ -4,11 +4,12 @@ use ExtUtils::MakeMaker;
 # the contents of the Makefile that is written.
 WriteMakefile(
     NAME              => 'DBIx::HA',
-    VERSION_FROM      => 'HA.pm', # finds $VERSION
+    VERSION_FROM      => 'lib/DBIx/HA.pm', # finds $VERSION
     PREREQ_PM         =>	{ 
-    						DBI => 1.30
+    						DBI => 1.44,
+    						Sys::SigAction => 0.04
     						}, # e.g., Module::Name => 1.1
     ($] >= 5.005 ?     ## Add these new keywords supported since 5.005
-      (ABSTRACT_FROM  => 'HA.pm', # retrieve abstract from module
+      (ABSTRACT_FROM  => 'lib/DBIx/HA.pm', # retrieve abstract from module
        AUTHOR         => 'Henri Asseily <henri@asseily.com>') : ()),
 );

@@ -11,23 +11,31 @@ use 5.006000;
 
 use constant DBIx_HA_DEBUG => 0;
 use Data::Dumper;
-use DBI ();
+use DBI 1.44 ();
+use Sys::SigAction qw( set_sig_handler );
 use Exporter ();
 use strict;
-use vars qw ( @ISA );
+use vars qw ( @ISA $prefix );
 @ISA = qw ( DBI );
 
+our $loaded_Apache = 0;
+our $loaded_Apache_DBI = 0;
+
 BEGIN {
-	eval { require Apache };
-	unless ($@) { import Apache; };
-	$DBIx::HA::VERSION = 0.61;
+	$DBIx::HA::VERSION = 0.91;
 }
 
-my $prefix = "$$ DBIx::HA:           "; 
+our $prefix = "[$$] DBIx::HA:           "; 
 my $logdir;
 
 sub initialize {
-	if ($INC{'Apache/DBI.pm'}) {
+	if ($Apache::VERSION) {
+		$loaded_Apache = 1;
+	}
+	if ($Apache::DBI::VERSION) {
+		$loaded_Apache_DBI = 1;
+	}
+	if ($loaded_Apache_DBI) {
 		$Apache::DBI::DEBUG = DBIx_HA_DEBUG;	# If we're debugging here, we should also debug Apache::DBI
 	}
 	if (DBIx_HA_DEBUG > 1) {
@@ -53,7 +61,7 @@ sub initialize {
 			$DBIx::HA::finddbserver{$_->[0]}  = $dbname;
 			# add timeout when within Apache::DBI
 			# default to no ping (-1)
-			if ($INC{'Apache/DBI.pm'}) {
+			if ($loaded_Apache_DBI) {
 				if ($Apache::DBI::VERSION < 0.89) {
 					die "$prefix Requirement unmet. Apache::DBI must be at version 0.89 or above";
 				}
@@ -69,12 +77,16 @@ sub initialize {
 		if(Apache->can('push_handlers') && ($Apache::ServerStarting == 1)) {
 			Apache->push_handlers(PerlChildInitHandler => \&_init_child);
 		}
-		# force a connection
-		# DBIx::HA->connect($dbname);
+		# do not force a connection here
+		# as we may be in the parent process. Connect in _init_child instead.
 	};
 }
 
 sub _init_child {
+	# Set up debugging PID for children
+	$DBIx::HA::prefix = "[$$] DBIx::HA:           "; 
+	$DBIx::HA::st::prefix = "[$$] DBIx::HA:st:        "; 
+	$DBIx::HA::db::prefix = "[$$] DBIx::HA:db:        "; 
 	if (DBIx_HA_DEBUG > 1) {
 		warn "$prefix in init_child:\n";
 	}
@@ -82,11 +94,11 @@ sub _init_child {
 	foreach $dbname (keys %DATABASE::conf) {
 		# under application failover, maybe we already have an active db.
 		# set the active database to be the first in the stack unless we got it earlier.
-		_readsharedfile($dbname) unless ($INC{'Apache.pm'});
+		_readsharedfile($dbname) unless ($loaded_Apache);
 		_writesharedfile($dbname, 0) unless ($DATABASE::conf{$dbname}->{'active_db'});
 
 		# allow for connect on initialization
-		if ($DATABASE::conf{$dbname}->{'connectoninit'} && $INC{'Apache/DBI.pm'}) {
+		if ($DATABASE::conf{$dbname}->{'connectoninit'} && $loaded_Apache_DBI) {
 			warn "$prefix Connecting to $dbname on init_child\n" if (DBIx_HA_DEBUG);
 			DBIx::HA->connect($dbname);
 		}
@@ -99,7 +111,7 @@ sub _readsharedfile {
 	my $dbname = shift;
 	if ($DATABASE::conf{$dbname}->{'failoverlevel'} eq 'application') {
 		# do this only if we're doing application failover and not process failover
-		if ($INC{'Apache.pm'}) {
+		if ($loaded_Apache) {
 			# $logdir = Apache::server_root_relative(undef,'logs'); # unnecessary since set during _writesharedfile on init
 			my $r = Apache->request;
 			if ($r && (! defined($r->notes("activedb_$dbname"))) && (-f "$logdir/DBIxHA_activedb_$dbname")) {
@@ -133,7 +145,7 @@ sub _writesharedfile {
 
 	if ($DATABASE::conf{$dbname}->{'failoverlevel'} eq 'application') {
 	# do this only if we're doing application failover and not process failover
-		if ($INC{'Apache.pm'}) {
+		if ($loaded_Apache) {
 			unless ($Apache::ServerStarting == 1) {
 				my $r = Apache->request;
 				$r->notes("activedb_$dbname", $dbidx) if (ref $r);
@@ -142,6 +154,9 @@ sub _writesharedfile {
 			open IN, ">/$logdir/DBIxHA_activedb_$dbname" || return 0;
 			print IN $DBIx::HA::activeserver{$dbname};
 			close IN;
+			if ($Apache::ServerStarting == 1) {
+				chmod 0666, "$logdir/DBIxHA_activedb_$dbname";
+			}
 		}
 	}
 	return 1;
@@ -204,7 +219,7 @@ sub _getnextdb {
 
 sub _getApacheDBIidx {
 	# generates the ApacheDBI cache idx key from the passed dsn info
-	if (! $INC{'Apache/DBI.pm'}) {
+	if (! $loaded_Apache_DBI) {
 		# Apache::DBI isn't loaded, exit.
 		return undef;
 	}
@@ -222,11 +237,12 @@ sub _getApacheDBIidx {
 
 sub _reconnect {
 	my $currdsn = shift;
+	our $dbh = shift || undef;
 	my $olddsn = $currdsn;	# old dsn to delete from Apache::DBI
 	my $conn_str;
 	my $selrow;
 	my $dbname = _getdbname ($currdsn);
-	my $dbh;
+	my $newdbh;
 	my $i;
 
 	if (! _isactivedb ($currdsn)) {	# wrong database server, use the active one
@@ -237,7 +253,7 @@ sub _reconnect {
 	my $dbstackindex = 0;	# pointer to position in the stack
 	foreach $selrow (@{$DATABASE::conf{$dbname}->{'db_stack'}}) {	# loop through the stack
 		if ($currdsn eq $selrow->[0]) {	# found the proper db server in the stack
-			if ($INC{'Apache/DBI.pm'}) { # delete the cached ApacheDBI entry
+			if ($loaded_Apache_DBI) { # delete the cached ApacheDBI entry
 				my $ApacheDBIConnections = Apache::DBI::all_handlers();
 				delete $$ApacheDBIConnections{$DBIx::HA::ApacheDBIidx{$olddsn}} if ($DBIx::HA::ApacheDBIidx{$olddsn});
 				warn "$prefix in _reconnect: deleted cached ApacheDBI entry ".$DBIx::HA::ApacheDBIidx{$olddsn}."\n" if (DBIx_HA_DEBUG);
@@ -248,17 +264,23 @@ sub _reconnect {
 			for ($i=$DATABASE::retries{$currdsn}; $i < $DATABASE::conf{$dbname}->{'max_retries'}; $i++) {	# retry max_retries
 				$DATABASE::retries{$currdsn}++;
 				# now try to destroy, clear, undefine every instance and pointer of and to the $dbh
-				eval { $dbh->DESTROY if $dbh; undef $dbh; };
-				$dbh = _connect_with_timeout (@$selrow);
-				if (defined $dbh) {
+				$newdbh = _connect_with_timeout (@$selrow);
+				if (defined $newdbh) {
 					# all is good
+					if (defined $dbh) {
+						warn "$prefix in _reconnect: Pointing dbh to newdbh\n" if (DBIx_HA_DEBUG);
+						$dbh->swap_inner_handle($newdbh);
+						undef $newdbh;
+					} else {
+						$dbh = $newdbh;
+					}
 					warn "$prefix in _reconnect: connected to $currdsn\n" if (DBIx_HA_DEBUG);
 					_writesharedfile($dbname, $dbstackindex);
 					# Do callback if it exists
 					if ( ref $DATABASE::conf{$dbname}->{'callback_function'}) {
 						&{$DATABASE::conf{$dbname}->{'callback_function'}}($dbh, $dbname);
 					}
-					return ($currdsn, $dbh); 
+					return ($currdsn); 
 				} #if
 				warn "$prefix in _reconnect: failed ".($i+1)." times to connect to $currdsn\n" if (DBIx_HA_DEBUG > 1);
 				select undef, undef, undef, 0.2; # wait a fraction of a second
@@ -279,7 +301,7 @@ sub _reconnect {
 
 sub connect {
 	warn "$prefix Apache::DBI handlers are: \n" if (DBIx_HA_DEBUG > 1);
-	warn Dumper Apache::DBI::all_handlers() if (DBIx_HA_DEBUG > 1);
+	warn Dumper Apache::DBI::all_handlers() if (DBIx_HA_DEBUG > 1 && $loaded_Apache_DBI);
 
 	my $class = shift;
 	my $dbname = shift;
@@ -293,12 +315,12 @@ sub connect {
 
 	# now we've got the right data source. Go ahead.
 	$DATABASE::retries{$dsn} = 0;	# initialize # of retries for the dsn
-	my $dbh = _connect_with_timeout($dsn, $username, $auth, $attrs);
+	our $dbh = _connect_with_timeout($dsn, $username, $auth, $attrs);
 	if (defined $dbh) {
 		warn "$prefix in connect: first try worked for $dsn\n" if (DBIx_HA_DEBUG);
 	} else {
 		warn "$prefix in connect: retrying connect of $dsn\n" if (DBIx_HA_DEBUG > 1);
-		($dsn, $dbh) = _reconnect ($dsn);
+		$dsn = _reconnect ($dsn);
 	}
 	return $dbh;
 }
@@ -307,58 +329,74 @@ sub _connect_with_timeout {
 	my ($dsn, $username, $auth, $attrs) = @_;
 	warn "$prefix in _connect_with_timeout: dsn: $dsn \n" if (DBIx_HA_DEBUG > 1);
 	my $res;
-	my $dbh;
+	our $dbh;
+	my $timeout = 0;
 	eval {
-		local $SIG{ALRM} = sub { warn "$prefix CONNECT TIMED OUT in $dsn" if (DBIx_HA_DEBUG); return undef; };
+		no strict;
+		my $h = set_sig_handler(
+			'ALRM', 
+			sub { $timeout = 1; die 'TIMEOUT'; },
+			{ mask=>['ALRM'], safe=>1 }
+		);
 		alarm($DATABASE::conf{_getdbname($dsn)}->{'connecttimeout'});
 		$dbh = DBI->connect($dsn, $username, $auth, $attrs);
 		alarm(0);
 	};
-	warn $@ if $@;
+	alarm(0);
+	if ($@ or $timeout) {	# there's a problem above
+		if ($timeout) {	# it's a timeout
+			warn "$prefix CONNECT TIMED OUT in $dsn";
+			eval { $dbh->disconnect };
+			$dbh = undef;
+		} else {	# problem in the connection
+			warn "$prefix Error in DBI::connect: $@\n" if $@;
+		}
+	}
 	return $dbh;
 }
 } # end package DBIx::HA
 
 {
 package DBIx::HA::db;
-use constant DBIx_HA_DEBUG => 0;
+use constant DBIx_HA_DEBUG => DBIx::HA::DBIx_HA_DEBUG;
 use vars qw ( @ISA );
 @ISA = qw(DBI::db DBIx::HA);
-my $prefix = "$$ DBIx::HA:db:        "; 
+our $prefix = "[$$] DBIx::HA:db:        "; 
 
-# note that he DBI::db methods do not fail if the database connection is dead
-
+# note that the DBI::db methods do not fail if the database connection is dead
 sub prepare {
-	my $dbh = shift;
+	our $dbh = shift;
 	my $sql = shift;
-	my $sth;
+	our $sth;
 	my $dsn = 'dbi:'.$dbh->{Driver}->{Name}.':'.$dbh->{Name};
 	warn "$prefix in prepare: dsn: $dsn ; sql: $sql \n" if (DBIx_HA_DEBUG > 1);
 	if (DBIx::HA::_isactivedb ($dsn)) {
-		$sth = $dbh->SUPER::prepare($sql);
+		warn "Statement handle being prepared while existing statement handle still open!\n\tdbh:\t\t$dsn\n\tprevious statement:\t".$dbh->{Statement}."\n\tcurrent statement:\t$sql\nACTIVE KIDS: ".$dbh->{ActiveKids}."\n" if ($dbh->{ActiveKids});
 	} else {
 		my $dbname = DBIx::HA::_getdbname($dsn);
-		($dsn, $dbh) = DBIx::HA::_reconnect ($dsn);
+		$dsn = DBIx::HA::_reconnect ($dsn, $dbh);
 		if (! defined $dbh) { # we couldn't connect at all
 			warn "$prefix in prepare: couldn't prepare sql: $sql\n";
 			return undef;
 		}
-		$sth = $dbh->DBI::db::prepare($sql);
 	}
+	$sth = $dbh->SUPER::prepare($sql);
+	return $sth;
 }
 	
 } # end package DBIx::HA::db
 
 {
 package DBIx::HA::st;
-use constant DBIx_HA_DEBUG => 0;
-use vars qw ( @ISA );
+use constant DBIx_HA_DEBUG => DBIx::HA::DBIx_HA_DEBUG;
+use Sys::SigAction qw( set_sig_handler );
+use vars qw ( @ISA $prefix );
 @ISA = qw(DBI::st DBIx::HA);
-my $prefix = "$$ DBIx::HA:st:        "; 
+our $prefix = "[$$] DBIx::HA:st:        "; 
 
 sub execute {
-	my $sth = shift;
-	my $dbh = $sth->{Database};
+	our $sth = shift;
+	our $dbh = $sth->{Database};
 	my $sql = $dbh->{Statement};
 	my $dsn = 'dbi:'.$dbh->{Driver}->{Name}.':'.$dbh->{Name};
 	my $res;
@@ -367,18 +405,16 @@ sub execute {
 	if (DBIx::HA::_isactivedb ($dsn)) {
 		$res = &_execute_with_timeout ($dsn, $sth);
 		if (! defined $res) {
-			# first try a simple statement. If it fails, then we should reconnect.
 			eval {
 				$sth->finish;
-				my $sth2 = $dbh->DBI::db::prepare('select 1');
-				my $res2 = &_execute_with_timeout ($dsn, $sth2);
-				$sth2->finish;
 			};
+			# first try a simple statement. If it fails, then we should reconnect.
+			my $res2 = $dbh->do('select 1');
 
 			if (! defined $res2) {
 				# Ooops. Even a simple statement fails. It's time to reconnect and reexecute
 				warn "$prefix in execute: execution failed, attempting reexecution. statement: $sql ; dsn: $dsn \n" if (DBIx_HA_DEBUG);
-				($dsn, $sth, $res) = _reexecute ($dsn, $sql);
+				($dsn, $sth, $res) = _reexecute ($dsn, $sql, $sth);
 			} else {
 				# here we have a problem: the original statement didn't execute but "select 1" did
 				# 2 choices:
@@ -387,14 +423,15 @@ sub execute {
 				# we will wait a short time and then try again just once
 				warn "$prefix in execute: server busy or bad sql: $sql ; dsn: $dsn \n" if (DBIx_HA_DEBUG);
 				select undef, undef, undef, 0.2;	# wait 200ms
-				$sth = $dbh->prepare($sql);
-				$res = _execute_with_timeout ($dsn, $sth);
-				
+				my $newsth = $dbh->prepare($sql);
+				$res = _execute_with_timeout ($dsn, $newsth);
+				$sth->swap_inner_handle($newsth);
+				undef $newsth;
 			}
 		}
 	} else { # current db is not active
 		eval { $sth->finish; };
-		($dsn, $sth, $res) = _reexecute ($dsn, $sql);
+		($dsn, $sth, $res) = _reexecute ($dsn, $sql, $sth);
 	}
 	if (! defined $res) { # what the hell?
 		warn "$prefix in execute: result is undefined, statement execution failed! statement: $sql ; dsn: $dsn \n";
@@ -413,17 +450,32 @@ sub execute {
 
 sub _execute_with_timeout {
 	my $dsn = shift;
-	my $sth = shift;
+	our $sth = shift;
 	my $sql = $sth->{Statement};
 	warn "$prefix in _execute_with_timeout: dsn: $dsn ; sql : $sql \n" if (DBIx_HA_DEBUG > 1);
 	my $res;
+	my $timeout = 0;
 	eval {
-		local $SIG{ALRM} = sub { warn "$prefix EXECUTION TIMED OUT in $dsn ; SQL: $sql" if (DBIx_HA_DEBUG); return undef; };
+		my $h = set_sig_handler(
+			'ALRM',
+			sub { $timeout = 1; die 'TIMEOUT'; },
+			{ mask=>['ALRM'],
+			safe=>1 }
+		);
 		alarm($DATABASE::conf{DBIx::HA::_getdbname($dsn)}->{'executetimeout'});
 		$res = $sth->SUPER::execute;
 		alarm(0);
 	};
-	warn "$prefix Error in DBI::execute: $@\n" if $@;
+	alarm(0);
+	if ($@ or $timeout) {	# there's a problem above
+		if ($timeout) {	# it's a timeout
+			warn "$prefix EXECUTION TIMED OUT in $dsn ; SQL: $sql";
+			eval { $sth->finish; };
+			$dbh = undef;
+		} else {	# problem in the execution
+			warn "$prefix Error in DBI::execute: $@\n" if $@;
+		}
+	}
 	return $res;
 }
 
@@ -435,16 +487,27 @@ sub _reexecute {
 	# it means that the statement sql is wrong and should not be retried.
 	my $dsn = shift;
 	my $sql = shift;
-	my $dbh;
+	our $sth = shift || undef;
+	our $dbh = undef;
+	my $newsth;
 	my $res;
 
 	warn "$prefix in _reexecute: dsn: $dsn \n" if (DBIx_HA_DEBUG > 1);
 	warn "$prefix Reexecuting statement: $sql" if (DBIx_HA_DEBUG > 1);
 	my $dbname = DBIx::HA::_getdbname($dsn);
-	($dsn, $dbh) = DBIx::HA::_reconnect ($dsn);
+	if (defined $sth) {
+		$dbh = $sth->{Database};
+	}
+	$dsn = DBIx::HA::_reconnect ($dsn, $dbh);
 	if (! defined $dbh) { return ($dsn, -666); } # we couldn't connect at all
-	my $sth = $dbh->DBI::db::prepare($sql);
-	$res = &_execute_with_timeout ($dsn, $sth);
+	$newsth = $dbh->prepare($sql);
+	$res = &_execute_with_timeout ($dsn, $newsth);
+	if (defined $sth) {
+		$sth->swap_inner_handle($newsth);
+		undef $newsth;
+	} else {
+		$sth = $newsth;
+	}
 	return ($dsn, $sth, $res) if (defined $res);
 	warn "$prefix in _reexecute: reexecuting failed. dsn: $dsn  ; statement: $sql\n" if (DBIx_HA_DEBUG);
 
@@ -503,7 +566,7 @@ be seamlessly used without code modification except for initialization.
 
 C<DBIx::HA> also works seamlessly with C<Apache::DBI> when available, and
 ensures that cached database handles in the Apache::DBI module are properly
-released when failing over.
+updated when failing over.
 
 Features of C<DBIx::HA> are:
 
@@ -520,7 +583,9 @@ back online before it is put back in service.
 =item timeouts
 
 Database calls are wrapped in user-configurable timeouts. Connect and execute
-timeouts are handled independently.
+timeouts are handled independently. As of version 0.62, timeouts are now
+handled through Sys::SigAction for consistent signal handling behavior across
+Perl versions.
 
 =item configurable retries
 
@@ -685,7 +750,7 @@ listed here for reference.
 
 =item _getApacheDBIidx ()
 
-=item _reconnect ( $dsn )
+=item _reconnect ( $dsn, [ $dbh ] )
 
 =item _connect_with_timeout ( $dsn, $username, $auth, \%attrs )
 
@@ -693,7 +758,7 @@ listed here for reference.
 
 =item _prepare_with_timeout ( $dsn, $dbh, $sql )
 
-=item _reexecute ( $dsn, $sql )
+=item _reexecute ( $dsn, $sql, [ $sth ] )
 
 =item _execute_with_timeout ( $dsn, $sth )
 
@@ -702,32 +767,6 @@ listed here for reference.
 =head1 TIPS AND TECHNIQUES
 
 =over 4
-
-=item using cached handles and the callback function
-
-If you are using Apache::DBI, chances are that your setup is for high
-performance. So you probably are caching your DBI handles (dbh) within
-your application. If that is the case, then you must not forget to use
-the callback functionality of C<DBIx::HA>. Your cached DBI handle MUST
-be updated if the HA module determines that your active database is
-unavailable.
-Here is an example of such a callback:
-
-$DATABASE::conf{'test'}->{'callback_function'}
- 								=> \&MyCallbackFunction;
-
-sub MyCallbackFunction {
-
-	my $dbh		= shift;
-
-	my $dbname	= shift;
-
-	$cached_dbh{$dbname} = $dbh;
-}
-
-The above sets sets up the callback function, and creates the callback
-function so that it updates your locally available %cached_dbh hash of
-database handles to the currently active one.
 
 =item load-balancing across read-only servers
 
@@ -751,9 +790,11 @@ define in that file as soon as they are ready to prepare or execute a statement.
 
 =head1 DEPENDENCIES
 
-This modules requires Perl >= 5.6.0.
+This modules requires Perl >= 5.6.0, DBI >= 1.44  and Sys::SigAction.
 Apache::DBI is recommended when using mod_perl.
 If using Apache::DBI, version 0.89 or above is required.
+Always load Apache::DBI and Apache before DBIx::HA if you want DBIx::HA to know
+of them.
 
 =head1 BUGS
 
@@ -765,6 +806,8 @@ A proper interface needs to be built for it.
 C<DBD::Multiplex> for simultaneous writes to multiple data sources.
 
 C<Apache::DBI> for ping timeouts and caching of database handles.
+
+C<Sys::SigAction> for safe signal handling, particularly with DBI.
 
 =head1 AUTHOR
 

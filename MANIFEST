@@ -1,8 +1,8 @@
 Changes
-HA.pm
 Makefile.PL
 MANIFEST
 README
 META.yml                                Module meta-data (added by MakeMaker)
+lib/DBIx/HA.pm
 t/base.t
 t/failover.t

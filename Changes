@@ -1,5 +1,11 @@
 Revision history for Perl extension DBIx::HA.
 
+0.91 Tue Oct 19 11:42:17 2004
+	- Significant rewrite to take advantage of DBI 1.44+'s
+	  swap_inner_handle(), simplifying the code a lot. It is now
+	  unnecessary to set up a callback only to clear cached handles.
+	- Multiple additional bug fixes and documentation updates.
+
 0.61 Wed Apr 28 11:51:52 2004
 	- Major bug fixes, specifically in the application failover logic.
 	- Some code optimizations.
