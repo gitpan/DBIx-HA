@@ -1,5 +1,11 @@
 Revision history for Perl extension DBIx::HA.
 
+0.95 Mon Nov 29 16:11:00 2004
+	- Much more reliable operation, especially in regards to timeouts.
+	- Now requires DBD::Sybase 1.04_14 or above if using Sybase.
+	- Got rid of the non-portable "select 1" and replaced it with	
+	  a reconnect.
+
 0.91 Tue Oct 19 11:42:17 2004
 	- Significant rewrite to take advantage of DBI 1.44+'s
 	  swap_inner_handle(), simplifying the code a lot. It is now
