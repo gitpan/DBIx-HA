@@ -20,14 +20,14 @@ use vars qw ( @ISA );
 BEGIN {
 	eval { require Apache };
 	unless ($@) { import Apache; };
-	$DBIx::HA::VERSION = 0.56;
+	$DBIx::HA::VERSION = 0.61;
 }
 
 my $prefix = "$$ DBIx::HA:           "; 
 my $logdir;
 
 sub initialize {
-	if ($INC{'Apache.pm'}) {
+	if ($INC{'Apache/DBI.pm'}) {
 		$Apache::DBI::DEBUG = DBIx_HA_DEBUG;	# If we're debugging here, we should also debug Apache::DBI
 	}
 	if (DBIx_HA_DEBUG > 1) {
@@ -36,21 +36,21 @@ sub initialize {
 	}
 	my $dbname;
 	foreach $dbname (keys %DATABASE::conf) {
+		# set default failover to process (i.e. each process is independent from others
+		# choices are : process, application
+		if (! $DATABASE::conf{$dbname}->{'failoverlevel'}) {
+			$DATABASE::conf{$dbname}->{'failoverlevel'} = 'process';
+		}
+		# add default timeouts for connection and execution
+		if (! $DATABASE::conf{$dbname}->{'connecttimeout'}) {
+			$DATABASE::conf{$dbname}->{'connecttimeout'} = 5;
+		}
+		if (! $DATABASE::conf{$dbname}->{'executetimeout'}) {
+			$DATABASE::conf{$dbname}->{'executetimeout'} = 10;
+		}
 		foreach (@{$DATABASE::conf{$dbname}->{'db_stack'}}) {
 			# create an easy reverse-lookup table for finding the db server name from the dsn
 			$DBIx::HA::finddbserver{$_->[0]}  = $dbname;
-			# set default failover to process (i.e. each process is independent from others
-			# choices are : process, application
-			if (! $DATABASE::conf{$dbname}->{'failoverlevel'}) {
-				$DATABASE::conf{$dbname}->{'failoverlevel'} = 'process';
-			}
-			# add default timeouts for connection and execution
-			if (! $DATABASE::conf{$dbname}->{'connecttimeout'}) {
-				$DATABASE::conf{$dbname}->{'connecttimeout'} = 5;
-			}
-			if (! $DATABASE::conf{$dbname}->{'executetimeout'}) {
-				$DATABASE::conf{$dbname}->{'executetimeout'} = 10;
-			}
 			# add timeout when within Apache::DBI
 			# default to no ping (-1)
 			if ($INC{'Apache/DBI.pm'}) {
@@ -63,12 +63,36 @@ sub initialize {
 			}
 		};
 		# set the active database to be the first in the stack
-		$DBIx::HA::activeserver{$dbname}  = 0;
-		$DATABASE::conf{$dbname}->{'active_db'} = $DATABASE::conf{$dbname}->{'db_stack'}->[$DBIx::HA::activeserver{$dbname}];
-		_writesharedfile($dbname);
-	};
+		_writesharedfile($dbname, 0) unless ($DATABASE::conf{$dbname}->{'active_db'});
 
+		# hook up the child initialization routine
+		if(Apache->can('push_handlers') && ($Apache::ServerStarting == 1)) {
+			Apache->push_handlers(PerlChildInitHandler => \&_init_child);
+		}
+		# force a connection
+		# DBIx::HA->connect($dbname);
+	};
 }
+
+sub _init_child {
+	if (DBIx_HA_DEBUG > 1) {
+		warn "$prefix in init_child:\n";
+	}
+	my $dbname;
+	foreach $dbname (keys %DATABASE::conf) {
+		# under application failover, maybe we already have an active db.
+		# set the active database to be the first in the stack unless we got it earlier.
+		_readsharedfile($dbname) unless ($INC{'Apache.pm'});
+		_writesharedfile($dbname, 0) unless ($DATABASE::conf{$dbname}->{'active_db'});
+
+		# allow for connect on initialization
+		if ($DATABASE::conf{$dbname}->{'connectoninit'} && $INC{'Apache/DBI.pm'}) {
+			warn "$prefix Connecting to $dbname on init_child\n" if (DBIx_HA_DEBUG);
+			DBIx::HA->connect($dbname);
+		}
+	};
+}
+
 
 sub _readsharedfile {
 	# reads from file-based shared memory to get active database under Apache
@@ -78,18 +102,18 @@ sub _readsharedfile {
 		if ($INC{'Apache.pm'}) {
 			# $logdir = Apache::server_root_relative(undef,'logs'); # unnecessary since set during _writesharedfile on init
 			my $r = Apache->request;
-			if ($r && (! $r->notes("activedb_$dbname")) && (-f "$logdir/DBIxHA_activedb_$dbname")) {
+			if ($r && (! defined($r->notes("activedb_$dbname"))) && (-f "$logdir/DBIxHA_activedb_$dbname")) {
 				open IN, "$logdir/DBIxHA_activedb_$dbname";
-				$_ = <IN>;
-				chomp;
+				my $dbidx = <IN>;
+				chomp $dbidx;
 				close IN;
-				if ((/^\d+$/) && ($_ <= scalar(@{$DATABASE::conf{$dbname}->{'db_stack'}}))) {
-					$DATABASE::conf{$dbname}->{'active_db'} = $DATABASE::conf{$dbname}->{'db_stack'}->[$_];
-					$DBIx::HA::activeserver{$dbname}  = $_;
-					$r->notes("activedb_$dbname", $_);
+				if (($dbidx =~ /^\d+$/o) && $DATABASE::conf{$dbname}->{'db_stack'}->[$dbidx]) {
+					$DATABASE::conf{$dbname}->{'active_db'} = $DATABASE::conf{$dbname}->{'db_stack'}->[$dbidx];
+					$DBIx::HA::activeserver{$dbname}  = $dbidx;
+					$r->notes("activedb_$dbname", $dbidx);
 				} else {
 					warn "$prefix in _isactivedb: $dbname shared file has erroneous content, overwriting.\n";
-					_writesharedfile($dbname);
+					_writesharedfile($dbname, $DBIx::HA::activeserver{$dbname});
 					return 0;
 				}
 			}
@@ -100,10 +124,20 @@ sub _readsharedfile {
 
 sub _writesharedfile {
 	my $dbname = shift;
-	# writes to file-based shared memory for active database under Apache
+	my $dbidx = shift;
+	# updates the active handle
+	# and writes to file-based shared memory for active database under Apache
+	warn "$prefix in _writesharedfile: activating index $dbidx for database $dbname\n" if (DBIx_HA_DEBUG);
+	$DATABASE::conf{$dbname}->{'active_db'} = $DATABASE::conf{$dbname}->{'db_stack'}->[$dbidx];
+	$DBIx::HA::activeserver{$dbname}  = $dbidx;
+
 	if ($DATABASE::conf{$dbname}->{'failoverlevel'} eq 'application') {
 	# do this only if we're doing application failover and not process failover
 		if ($INC{'Apache.pm'}) {
+			unless ($Apache::ServerStarting == 1) {
+				my $r = Apache->request;
+				$r->notes("activedb_$dbname", $dbidx) if (ref $r);
+			}
 			$logdir = Apache::server_root_relative(undef,'logs');
 			open IN, ">/$logdir/DBIxHA_activedb_$dbname" || return 0;
 			print IN $DBIx::HA::activeserver{$dbname};
@@ -130,6 +164,7 @@ sub _isactivedb {
 		return 1;
 	}
 	warn "$prefix in _isactivedb: ".$dsn." is NOT active \n" if (DBIx_HA_DEBUG > 2);
+	$DATABASE::retries{$DATABASE::conf{$dbname}->{'active_db'}->[0]} = 0;	# reset the active db's retries for this process
 	return 0;
 }
 
@@ -140,8 +175,8 @@ sub _getnextdb {
 	if (_isactivedb ($dsn)) {
 		# do this only if we are the first to look for a good db server
 		# otherwise just return the active db server
-		my $idxnextdb = 0;
 		my $foundmatch = 0;
+		my $idxnextdb = 0;
 		my $stackcount = scalar(@{$DATABASE::conf{$dbname}->{'db_stack'}});
 		foreach (@{$DATABASE::conf{$dbname}->{'db_stack'}}) {
 			$idxnextdb++;
@@ -155,11 +190,11 @@ sub _getnextdb {
 		if (! $foundmatch) {	# didn't find a match, current dsn is invalid
 			warn "$prefix in _getnextdb: current dsn is invalid for $dbname: $dsn \n" if (DBIx_HA_DEBUG);
 			$idxnextdb = 0;
-		} elsif ($idxnextdb > ($stackcount -1)) {
+		} elsif ($idxnextdb > ($stackcount - 1)) {
 			warn "$prefix in _getnextdb: Reached end of db server stack for $dbname. Staying there.\n" if (DBIx_HA_DEBUG);
-			$idxnextdb = $stackcount;
+			$idxnextdb = $stackcount - 1;
 		}
-		$DATABASE::conf{$dbname}->{'active_db'} = $DATABASE::conf{$dbname}->{'db_stack'}->[$idxnextdb];
+		_writesharedfile($dbname, $idxnextdb);
 		warn "$prefix in _getnextdb: activated ".$DATABASE::conf{$dbname}->{'active_db'}->[0]." \n" if (DBIx_HA_DEBUG);
 	} else {
 		warn "$prefix in _getnextdb: found different active db server, switching to ".$DATABASE::conf{$dbname}->{'active_db'}->[0]."\n" if (DBIx_HA_DEBUG);
@@ -187,9 +222,9 @@ sub _getApacheDBIidx {
 
 sub _reconnect {
 	my $currdsn = shift;
+	my $olddsn = $currdsn;	# old dsn to delete from Apache::DBI
 	my $conn_str;
 	my $selrow;
-	my $dbstackindex = 0;	# pointer to position in the stack
 	my $dbname = _getdbname ($currdsn);
 	my $dbh;
 	my $i;
@@ -198,14 +233,14 @@ sub _reconnect {
 		$currdsn = _getnextdb ($currdsn);
 	}
 
-	FINDDB: { foreach (@{$DATABASE::conf{$dbname}->{'db_stack'}}) {	# loop through the stack
-		$selrow = $_;
-		$dbstackindex++;
+	FINDDB: {
+	my $dbstackindex = 0;	# pointer to position in the stack
+	foreach $selrow (@{$DATABASE::conf{$dbname}->{'db_stack'}}) {	# loop through the stack
 		if ($currdsn eq $selrow->[0]) {	# found the proper db server in the stack
 			if ($INC{'Apache/DBI.pm'}) { # delete the cached ApacheDBI entry
 				my $ApacheDBIConnections = Apache::DBI::all_handlers();
-				delete $$ApacheDBIConnections{$DBIx::HA::ApacheDBIidx{$currdsn}};
-				warn "$prefix in _reconnect: deleted cached ApacheDBI entry ".$DBIx::HA::ApacheDBIidx{$currdsn}."\n" if (DBIx_HA_DEBUG);
+				delete $$ApacheDBIConnections{$DBIx::HA::ApacheDBIidx{$olddsn}} if ($DBIx::HA::ApacheDBIidx{$olddsn});
+				warn "$prefix in _reconnect: deleted cached ApacheDBI entry ".$DBIx::HA::ApacheDBIidx{$olddsn}."\n" if (DBIx_HA_DEBUG);
 			}
 			warn "$prefix in _reconnect: retrying ".$selrow->[0]."\n" if (DBIx_HA_DEBUG);
 			$i=0;
@@ -218,8 +253,7 @@ sub _reconnect {
 				if (defined $dbh) {
 					# all is good
 					warn "$prefix in _reconnect: connected to $currdsn\n" if (DBIx_HA_DEBUG);
-					$DATABASE::conf{$dbname}->{'active_db'} = $selrow;
-					_writesharedfile($dbname);
+					_writesharedfile($dbname, $dbstackindex);
 					# Do callback if it exists
 					if ( ref $DATABASE::conf{$dbname}->{'callback_function'}) {
 						&{$DATABASE::conf{$dbname}->{'callback_function'}}($dbh, $dbname);
@@ -231,13 +265,14 @@ sub _reconnect {
 			} #for
 			# we found our db server in the stack, but couldn't connect to it
 			# Get another one, and try again, assuming we've not exhausted the stack!
-			if ($dbstackindex < scalar(@{$DATABASE::conf{$dbname}->{'db_stack'}})) {
-				$currdsn = _getnextdb ($currdsn);	# go to next dsn
-				warn "$prefix in _reconnect: dbstackindex: $dbstackindex; Trying another db server: $currdsn \n" if (DBIx_HA_DEBUG);
-				goto FINDDB;
-			}
+			$olddsn = $currdsn;			# remember the old one to delete it from Apache::DBI
+			$currdsn = _getnextdb ($currdsn);	# go to next dsn
+			warn "$prefix in _reconnect: dbstackindex: $dbstackindex; Trying another db server: $currdsn \n" if (DBIx_HA_DEBUG);
+			goto FINDDB;
 		} #if
-	} } #FINDDB
+		$dbstackindex++;
+	} #foreach
+	} # FINDDB
 	warn "$prefix in _reconnect: Couldn't find a good data source, dbh is undefined. Pointing to $currdsn\n";
 	return ($currdsn, undef);	# bad dbh! (multiple tries failed)
 }
@@ -333,10 +368,12 @@ sub execute {
 		$res = &_execute_with_timeout ($dsn, $sth);
 		if (! defined $res) {
 			# first try a simple statement. If it fails, then we should reconnect.
-			eval { $sth->finish; };
-			my $sth2 = $dbh->DBI::db::prepare('select 1');
-			my $res2 = &_execute_with_timeout ($dsn, $sth2);
-			eval { $sth2->finish; };
+			eval {
+				$sth->finish;
+				my $sth2 = $dbh->DBI::db::prepare('select 1');
+				my $res2 = &_execute_with_timeout ($dsn, $sth2);
+				$sth2->finish;
+			};
 
 			if (! defined $res2) {
 				# Ooops. Even a simple statement fails. It's time to reconnect and reexecute
@@ -378,7 +415,7 @@ sub _execute_with_timeout {
 	my $dsn = shift;
 	my $sth = shift;
 	my $sql = $sth->{Statement};
-	warn "$prefix in _execute_with_timeout: dsn: $dsn ; sth: $sth \n" if (DBIx_HA_DEBUG > 1);
+	warn "$prefix in _execute_with_timeout: dsn: $dsn ; sql : $sql \n" if (DBIx_HA_DEBUG > 1);
 	my $res;
 	eval {
 		local $SIG{ALRM} = sub { warn "$prefix EXECUTION TIMED OUT in $dsn ; SQL: $sql" if (DBIx_HA_DEBUG); return undef; };
@@ -444,6 +481,7 @@ DBIx::HA - High Availability package for DBI
         [ 'dbi:Sybase:server=prod2;database=test', 'user2', 'password2', $connect_attributes ],
         [ 'dbi:Sybase:server=prod3;database=test', 'user3', 'password3', $connect_attributes ],
         ],
+    connectoninit   => 0,
     pingtimeout     => -1,
     failoverlevel   => 'application',
     connecttimeout  => 1,
@@ -538,6 +576,13 @@ already retried once before, and max_retries is 3, if datasource #1 can't be
 reached twice in a row then I<_reconnect()> will reset the number of tries
 and go to datasource #2 if available.
 
+=item connectoninit ( DEFAULT: 0 )
+
+If set to 1, then during the I<initialize()> phase this database connections
+will be instantiated with its currently  active db_stack entry.
+This is very useful under mod_perl and replaces the C<Apache::DBI>
+I<connect_on_init()> method. 
+
 =item pingtimeout ( DEFAULT: -1 )
 
 this is only useful in conjunction with C<Apache::DBI>. The default of -1
@@ -573,7 +618,7 @@ timeout for connecting to a datasource, in seconds.
 
 =item executetimeout ( DEFAULT: 10 )
 
-timeout for execution of a statement, in seconds.
+timeout for preparation or execution of a statement, in seconds.
 
 =item callback_function ( DEFAULT: I<none> )
 
@@ -626,9 +671,11 @@ listed here for reference.
 
 =over 4
 
+=item _init_child ()
+
 =item _readsharedfile ( $dbname )
 
-=item _writesharedfile ( $dbname )
+=item _writesharedfile ( $dbname, $dbstackindex )
 
 =item _getdbname ( $dsn )
 
@@ -641,6 +688,12 @@ listed here for reference.
 =item _reconnect ( $dsn )
 
 =item _connect_with_timeout ( $dsn, $username, $auth, \%attrs )
+
+=item _reprepare ( $dsn, $sql )
+
+=item _prepare_with_timeout ( $dsn, $dbh, $sql )
+
+=item _reexecute ( $dsn, $sql )
 
 =item _execute_with_timeout ( $dsn, $sth )
 
@@ -696,6 +749,12 @@ define in that file as soon as they are ready to prepare or execute a statement.
 
 =back
 
+=head1 DEPENDENCIES
+
+This modules requires Perl >= 5.6.0.
+Apache::DBI is recommended when using mod_perl.
+If using Apache::DBI, version 0.89 or above is required.
+
 =head1 BUGS
 
 Currently I<%DATABASE::conf> needs to be manually and directly populated.
@@ -721,4 +780,5 @@ it and/or modify it under the same terms as Perl itself.
 
 
 =cut
+
 

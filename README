@@ -1,4 +1,4 @@
-DBIx/HA version 0.56
+DBIx/HA version 0.61
 ====================
 
 DBIx::HA is a High Availability module for DBI. It is implemented by
@@ -53,6 +53,7 @@ DEPENDENCIES
 
 This modules requires Perl >= 5.6.0.
 Apache::DBI is recommended when using mod_perl.
+If using Apache::DBI, version 0.89 or above is required.
 
 COPYRIGHT AND LICENCE
 

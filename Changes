@@ -1,5 +1,11 @@
 Revision history for Perl extension DBIx::HA.
 
+0.61 Wed Apr 28 11:51:52 2004
+	- Major bug fixes, specifically in the application failover logic.
+	- Some code optimizations.
+	- Now checking the prepare() method for validity of active handle.
+	- POD updates. Added dependencies section.
+
 0.56 Wed Feb 04 12:02:00 2004
 	- Removed dependencies on Apache::DBI. There was no error
 	  under 5.8.1 but 5.8.0 wasn't passing tests. Apache::DBI
