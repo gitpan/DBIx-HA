@@ -1,5 +1,24 @@
 Revision history for Perl extension DBIx::HA.
 
+0.99 Wed Oct 04 18:18:00 2006
+	- Fix for Apache children always starting at index 0 and
+	  overwriting shared file if under app failover.
+	- Simplified logic of _readsharedfile().
+	- Changed and simplified execute(): now it always both reconnects
+	  and reexecutes a statement in case of hard failure (it used
+	  to only reconnect).
+
+0.98 Tue Oct 03 13:11:12 2006 (unreleased)
+	- Cleanup of statement handles when database handle is swapped
+	- Better logging
+	- Now requires DBI version 1.49
+
+0.97 Fri Aug 18 16:37:00 2006 (unreleased)
+	- Added the Error Fail Test functionality.
+
+0.96 Tue Dec 07 10:35:00 2004 (unreleased)
+	- Added a sth->finish if the server returns an sql error.
+
 0.95 Mon Nov 29 16:11:00 2004
 	- Much more reliable operation, especially in regards to timeouts.
 	- Now requires DBD::Sybase 1.04_14 or above if using Sybase.

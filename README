@@ -1,4 +1,4 @@
-DBIx/HA version 0.91
+DBIx/HA version 0.99
 ====================
 
 DBIx::HA is a High Availability module for DBI. It is implemented by
@@ -27,8 +27,8 @@ Queries can be retried n times before a datasource is considered failed.
 
 - callback function
 A user-defined callback function can be called upon abnormal failure and
-disconnection from a datasource in order to perform housekeeping tasks unique
-to the user's application.
+disconnection from a datasource in order to clean locally cached handles and
+perform other housekeeping tasks.
 
 - inter-process automatic failover under mod_perl
 Failover can be triggered for a single process or a set of processes at the
@@ -51,14 +51,14 @@ To install this module type the following:
 
 DEPENDENCIES
 
-This modules requires Perl >= 5.6.0, DBI >= 1.44 and Sys::SigAction.
-Apache::DBI is recommended when using mod_perl.
+This modules requires Perl >= 5.6.0.
+It also requires DBI >= 1.49
+Apache::DBI is recommended when using mod_perl (v1 only).
 If using Apache::DBI, version 0.89 or above is required.
-If using DBD::Sybase, version 1.04_14 or above is required.
 
 COPYRIGHT AND LICENCE
 
-Copyright (C) 2003-2004 Henri Asseily <henri@asseily.com>.
+Copyright (C) 2003-2006 Henri Asseily <henri@asseily.com>.
 
 All rights reserved. This library is free software; you can
 redistribute it and/or modify it under the same terms as Perl

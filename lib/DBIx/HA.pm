@@ -1,6 +1,6 @@
 # High Availability package for DBI
 #
-# Copyright (c) 2003-2004 Henri Asseily <henri@asseily.com>. All rights reserved.
+# Copyright (c) 2003-2006 Henri Asseily <henri@asseily.com>. All rights reserved.
 # This program is free software; you can redistribute it and/or
 # modify it under the same terms as Perl itself.
 
@@ -11,7 +11,7 @@ use 5.006000;
 
 use constant DBIx_HA_DEBUG => 0;
 use Data::Dumper;
-use DBI 1.44 ();
+use DBI 1.49 ();
 use Sys::SigAction qw( set_sig_handler );
 use Exporter ();
 use strict;
@@ -20,13 +20,20 @@ use vars qw ( @ISA $prefix );
 
 our $loaded_Apache = 0;
 our $loaded_Apache_DBI = 0;
+our $logdir;
 
 BEGIN {
-	$DBIx::HA::VERSION = 0.95;
+	$DBIx::HA::VERSION = 0.99;
+
+	# Sample Fail Test Functions for different Database Servers
+	# They are used in the configuration 
+	# Input is ($ErrorID, $ErrorString)
+	# Output is boolean: If true, then we'll consider the error a critical condition, ok to failover
+	# If false, then DBIx::HA will not act on it and pass it straight through to the client
+	sub FTF_SybaseASE { $_[0] > 10 ? 0 : 1 }; # Fail Test Function for Sybase ASE
 }
 
 our $prefix = "[$$] DBIx::HA:           "; 
-my $logdir;
 
 sub initialize {
 	if ($Apache::VERSION) {
@@ -55,6 +62,12 @@ sub initialize {
 		}
 		if (! $DATABASE::conf{$dbname}->{'executetimeout'}) {
 			$DATABASE::conf{$dbname}->{'executetimeout'} = 10;
+		}
+		# add default failover rule based on DBI error
+		# default is to not request failover, whatever the error
+		# do not ever set the default to always request failover, as any SQL error would trigger failover!
+		if (! $DATABASE::conf{$dbname}->{'failtest_function'}) {
+			$DATABASE::conf{$dbname}->{'failtest_function'} = sub { 0 };
 		}
 		$DATABASE::conf{$dbname}->{'end_of_stack'} = 0;	# error condition reaching end of stack
 		foreach (@{$DATABASE::conf{$dbname}->{'db_stack'}}) {
@@ -95,7 +108,7 @@ sub _init_child {
 	foreach $dbname (keys %DATABASE::conf) {
 		# under application failover, maybe we already have an active db.
 		# set the active database to be the first in the stack unless we got it earlier.
-		_readsharedfile($dbname) unless ($loaded_Apache);
+		_readsharedfile($dbname);
 		_writesharedfile($dbname, 0) unless ($DATABASE::conf{$dbname}->{'active_db'});
 
 		# allow for connect on initialization
@@ -112,28 +125,27 @@ sub _readsharedfile {
 	my $dbname = shift;
 	if ($DATABASE::conf{$dbname}->{'failoverlevel'} eq 'application') {
 		# do this only if we're doing application failover and not process failover
-		if ($loaded_Apache) {
-			# $logdir = Apache::server_root_relative(undef,'logs'); # unnecessary since set during _writesharedfile on init
-			my $r = Apache->request;
-			if ($r && (! defined($r->notes("activedb_$dbname"))) && (-f "$logdir/DBIxHA_activedb_$dbname")) {
-				open IN, "$logdir/DBIxHA_activedb_$dbname";
-				my $dbidx = <IN>;
-				chomp $dbidx;
-				close IN;
-				if ($dbidx == -1) {	# we're told that we're at the end of the stack. No db server is available.
-					$DATABASE::conf{$dbname}->{'end_of_stack'} = 1;
-					return 0;
+		if ($loaded_Apache && (-f "$logdir/DBIxHA_activedb_$dbname")) {
+			open IN, "$logdir/DBIxHA_activedb_$dbname";
+			my $dbidx = <IN>;
+			chomp $dbidx;
+			close IN;
+			if ($dbidx == -1) {	# we're told that we're at the end of the stack. No db server is available.
+				$DATABASE::conf{$dbname}->{'end_of_stack'} = 1;
+				return 0;
+			}
+			$DATABASE::conf{$dbname}->{'end_of_stack'} = 0;
+			if (($dbidx =~ /^\d+$/o) && $DATABASE::conf{$dbname}->{'db_stack'}->[$dbidx]) {
+				$DATABASE::conf{$dbname}->{'active_db'} = $DATABASE::conf{$dbname}->{'db_stack'}->[$dbidx];
+				$DBIx::HA::activeserver{$dbname}  = $dbidx;
+				unless ($Apache::ServerStarting == 1) {
+					my $r = Apache->request;
+					$r->notes("activedb_$dbname", $dbidx) if (ref $r);
 				}
-				$DATABASE::conf{$dbname}->{'end_of_stack'} = 0;
-				if (($dbidx =~ /^\d+$/o) && $DATABASE::conf{$dbname}->{'db_stack'}->[$dbidx]) {
-					$DATABASE::conf{$dbname}->{'active_db'} = $DATABASE::conf{$dbname}->{'db_stack'}->[$dbidx];
-					$DBIx::HA::activeserver{$dbname}  = $dbidx;
-					$r->notes("activedb_$dbname", $dbidx);
-				} else {
-					warn "$prefix in _isactivedb: $dbname shared file has erroneous content, overwriting.\n";
-					_writesharedfile($dbname, $DBIx::HA::activeserver{$dbname});
-					return 0;
-				}
+			} else {
+				warn "$prefix in _readsharedfile: $dbname shared file has erroneous content, overwriting.\n";
+				_writesharedfile($dbname, $DBIx::HA::activeserver{$dbname});
+				return 0;
 			}
 		}
 	}
@@ -282,19 +294,25 @@ sub _reconnect {
 			$DATABASE::retries{$currdsn} = 0 if (! $DATABASE::retries{$currdsn});
 			for ($i=$DATABASE::retries{$currdsn}; $i < $DATABASE::conf{$dbname}->{'max_retries'}; $i++) {	# retry max_retries
 				$DATABASE::retries{$currdsn}++;
-				# now try to destroy, clear, undefine every instance and pointer of and to the $dbh
+				# now we're going to create a new good database handle and swap it with the old bad one
 				$newdbh = _connect_with_timeout (@$selrow);
 				if (defined $newdbh) {
-					# all is good
+					# we managed to create a new database handle
 					if ((defined $dbh) && (ref $dbh)) {
+						# the old one still exists, so we're going to swap it and then destroy it
 						warn "$prefix in _reconnect: Pointing dbh to newdbh\n" if (DBIx_HA_DEBUG);
 						$dbh->swap_inner_handle($newdbh);
-						eval { $newdbh->disconnect; };
-						undef $newdbh;
+						# wipe the old database handle (which in turn finishes all its children sth's)
+						# If we're using DBD::Sybase, make sure syb_flush_finish is off so we don't get remaining results
+						if ($dbh->{Driver}->{Name} eq 'Sybase') {
+							$newdbh->{syb_flush_finish} = 0;
+						}
+						eval { undef $newdbh; };
 					} else {
+						# there was no previous active database handle, so that's easy
 						$dbh = $newdbh;
 					}
-					warn "$prefix in _reconnect: connected to $currdsn\n" if (DBIx_HA_DEBUG);
+					warn "$prefix Successfully reconnected to $currdsn\n";
 					$DATABASE::retries{$currdsn} = 0; # reset the retries counter
 					_writesharedfile($dbname, $dbstackindex);
 					# Do callback if it exists
@@ -314,7 +332,7 @@ sub _reconnect {
 				warn "$prefix *** ERROR: Exhausted DBI failover stack. Last DSN is: $olddsn \n";
 				return ($olddsn, undef);
 			}
-			warn "$prefix in _reconnect: dbstackindex: $dbstackindex; Trying another db server: $currdsn \n" if (DBIx_HA_DEBUG);
+			warn "$prefix in _reconnect: dbstackindex: $dbstackindex; Trying another db server: $currdsn \n";
 			goto FINDDB;
 		} #if
 		$dbstackindex++;
@@ -369,7 +387,7 @@ sub _connect_with_timeout {
 	alarm(0);
 	if ($@ or $timeout) {	# there's a problem above
 		if ($timeout) {	# it's a timeout
-			warn "$prefix CONNECT TIMED OUT in $dsn";
+			warn "$prefix *** CONNECT TIMED OUT in $dsn";
 			eval { $dbh->disconnect };
 			$dbh = undef;
 		} else {	# problem in the connection
@@ -382,6 +400,7 @@ sub _connect_with_timeout {
 
 {
 package DBIx::HA::db;
+use strict;
 use constant DBIx_HA_DEBUG => DBIx::HA::DBIx_HA_DEBUG;
 use vars qw ( @ISA );
 @ISA = qw(DBI::db DBIx::HA);
@@ -412,6 +431,7 @@ sub prepare {
 
 {
 package DBIx::HA::st;
+use strict;
 use constant DBIx_HA_DEBUG => DBIx::HA::DBIx_HA_DEBUG;
 use Sys::SigAction qw( set_sig_handler );
 use vars qw ( @ISA $prefix );
@@ -423,10 +443,12 @@ sub execute {
 	my $dbh = $sth->{Database};
 	my $sql = $dbh->{Statement};
 	my $dsn = 'dbi:'.$dbh->{Driver}->{Name}.':'.$dbh->{Name};
+	my $dbname = DBIx::HA::_getdbname($dsn);
 	my $res;
 	my $to;	# did we trip a timeout on the execution?
 	my $orig_error_code;
 	my $orig_error_string;
+	my $max_executions = $DATABASE::conf{$dbname}->{'max_retries'} * scalar(@{$DATABASE::conf{$dbname}->{'db_stack'}});
 
 	warn "=================\n" if (DBIx_HA_DEBUG > 1);
 	warn "$prefix in execute: dsn: $dsn ; sql: $sql \n" if (DBIx_HA_DEBUG > 1);
@@ -434,24 +456,13 @@ sub execute {
 		($res, $to) = &_execute_with_timeout ($dsn, $sth);
 		$orig_error_code = $DBI::err;
 		$orig_error_string = $DBI::errstr;
-		if ($to) {
-			# It was a timeout error. The database handle may be in an unstable state, we must clear it.
-			# To check if the database is still active, we try to connect to it again.
-			# If that succeeds, then the database is fine. If not, then we need to fail over.
-			my ($dummy_dsn, $username, $auth, $attrs) = @{$DATABASE::conf{&DBIx::HA::_getdbname($dsn)}->{'active_db'}};
-			my $newdbh = &DBIx::HA::_connect_with_timeout($dsn, $username, $auth, $attrs);
-			if (! $newdbh) {
-				# Ooops. Even a new database connect fails. It's time to reconnect and reexecute
-				warn "$prefix in execute: execution failed with timeout, database unavailable. Attempting reconnect (with potential failover). Statement: $sql ; dsn: $dsn \n" if (DBIx_HA_DEBUG);
+		if ($to || ((! defined $res) && &{$DATABASE::conf{$dbname}->{'failtest_function'}}($orig_error_code, $orig_error_string))) {
+			# It was a timeout error or a critical network library error (connection in a bad state)
+			warn "$prefix in execute: timeout error or network lib error, reexecuting: $sql ; dsn: $dsn \n" if (DBIx_HA_DEBUG);
+			for (my $count_execs = 0; $count_execs < $max_executions; $count_execs++) {
 				($dsn, $sth, $res) = _reexecute ($dsn, $sql, $sth);
-			} else {
-				# the reconnect worked, so the database is fine.
-				# get rid of the old database handle
-				warn "$prefix *** TIMEOUT! server busy: $sql ; dsn: $dsn \n" if (DBIx_HA_DEBUG);
-				$dbh->swap_inner_handle($newdbh);
-				eval { $newdbh->disconnect; };
-				undef $newdbh;
-			}
+				last if (defined $res); # reexecution worked (or failed hard with -666)
+			} 
 		} elsif (! defined $res) {
 			# We got an error code from the server upon statement execution.
 			# We will let the client decide what to do and let it be.
@@ -459,8 +470,10 @@ sub execute {
 			warn "$prefix in execute: bad sql: $sql ; dsn: $dsn \n" if (DBIx_HA_DEBUG);
 		}
 	} else { # current db is not active
-		eval { $sth->finish; };
-		($dsn, $sth, $res) = _reexecute ($dsn, $sql, $sth);
+		for (my $count_execs = 0; $count_execs < $max_executions; $count_execs++) {
+			($dsn, $sth, $res) = _reexecute ($dsn, $sql, $sth);
+			last if (defined $res); # reexecution worked (or failed hard with -666)
+		}
 	}
 	if (! defined $res) { # Execution failed
 		warn "$prefix in execute: result is undefined, statement execution failed! statement: $sql ; dsn: $dsn \n" if (DBIx_HA_DEBUG);
@@ -468,7 +481,7 @@ sub execute {
 		return undef;
 	}
 	if ($res == -666) { # the devil killed you! We couldn't connect to the db!
-		warn "$prefix in execute: statement couldn't be executed because connect failed abnormally. statement: $sql ; dsn: $dsn \n" if (DBIx_HA_DEBUG);
+		warn "$prefix in execute: statement couldn't be executed because connect failed abnormally. statement: $sql ; dsn: $dsn \n";
 		warn "+++++++++++++++++\n" if (DBIx_HA_DEBUG > 1);
 		return undef;
 	}
@@ -501,7 +514,7 @@ sub _execute_with_timeout {
 	alarm(0);
 	if ($@ or $timeout) {	# there's a problem above
 		if ($timeout) {	# it's a timeout
-			warn "$prefix EXECUTION TIMED OUT in $dsn ; SQL: $sql";
+			warn "$prefix *** EXECUTION TIMED OUT in $dsn ; SQL: $sql";
 		} else {	# problem in the execution
 			warn "$prefix Error in DBI::execute: $@\n" if $@;
 		}
@@ -515,9 +528,7 @@ sub _execute_with_timeout {
 sub _reexecute {
 	# reexecute the statement in the following way:
 	# reconnect with a new dbh
-	# redo prepare and execute
-	# only do it once, since if the connection works and the execution doesn't,
-	# it means that the statement sql is wrong and should not be retried.
+	# redo prepare and execute until it works
 	my $dsn = shift;
 	my $sql = shift;
 	my $sth = shift || undef;
@@ -532,7 +543,7 @@ sub _reexecute {
 		$dbh = $sth->{Database};
 	}
 	($dsn, $dbh) = DBIx::HA::_reconnect ($dsn, $dbh);
-	if (! defined $dbh) { return ($dsn, -666); } # we couldn't connect at all
+	if (! defined $dbh) { return ($dsn, $sth, -666); } # we couldn't connect at all
 	$newsth = $dbh->prepare($sql);
 	($res, $to) = &_execute_with_timeout ($dsn, $newsth);
 	if (! $res) {	# execute_with_timeout failed
@@ -586,6 +597,7 @@ DBIx::HA - High Availability package for DBI
     connecttimeout  => 1,
     executetimeout  => 8,
     callback_function => \&MyCallbackFunction,
+	failtest_function   => \&DBIx::HA::FTF_SybaseASE,
     };
 
  DBIx::HA->initialize();
@@ -731,6 +743,25 @@ indexing. If the connect fails, then we fail over.
 reference to a function to call whenever the datasource is changed due to a
 failover. See the TIPS sections for a usage example.
 
+=item failtest_function ( DEFAULT: sub{0} )
+
+reference to a function to call to test if a DBI error is a candidate for
+failover or not.
+Input is ($ErrorID, $ErrorString)
+Output is boolean: If true, then we'll consider the error a critical
+condition, ok to failover. If false, then DBIx::HA will not act on it
+and pass it straight through to the client.
+
+This Fail Test Function (FTF) function is extremely important for the proper
+functioning of DBIx::HA. You must be careful  in defining it
+precisely, based on the database engine that you are using. As a
+convenience to the user, DBIx::HA defines some sample functions that
+you can use. At this time, only the following samples are defined:
+
+ DBIx::HA::FTF_SybaseASE
+
+Example use is in the synopsis
+
 =back
 
 =head1 USER METHODS
@@ -839,7 +870,7 @@ bounce Apache.
 
 =head1 DEPENDENCIES
 
-This modules requires Perl >= 5.6.0, DBI >= 1.44  and Sys::SigAction.
+This modules requires Perl >= 5.6.0, DBI >= 1.49  and Sys::SigAction.
 Apache::DBI is recommended when using mod_perl.
 If using Apache::DBI, version 0.89 or above is required.
 Always load Apache::DBI and Apache before DBIx::HA if you want DBIx::HA to know
@@ -864,7 +895,7 @@ Henri Asseily <henri@asseily.com>
 
 =head1 COPYRIGHT
 
-Copyright (c) 2003-2004 Henri Asseily <henri@asseily.com>.
+Copyright (c) 2003-2006 Henri Asseily <henri@asseily.com>.
 All rights reserved. This program is free software; you can redistribute
 it and/or modify it under the same terms as Perl itself.
 
