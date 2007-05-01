@@ -47,7 +47,7 @@ is (DBIx::HA->initialize(), '', 'initialize()');
 my $dbh = DBIx::HA->connect('test');
 is (ref($dbh), 'DBIx::HA::db', 'connect()');
     
-my $sth = $dbh->prepare(select 1);
+my $sth = $dbh->prepare("select 1");
 is (ref($sth), 'DBIx::HA::st', 'prepare()');
 
 # hard-code a switch to the next handle
@@ -56,5 +56,8 @@ $DATABASE::conf{'test'}->{'active_db'} = $DATABASE::conf{'test'}->{'db_stack'}->
 is ($sth->execute, 1, 'execute() on failover');
 is (DBIx::HA::_isactivedb($DATABASE::conf{'test'}->{'db_stack'}->[1]->[0]), 1, 'failover to secondary db');
 is ($dbname, 'test', 'callback function was called');
+
+$sth->fetchall_arrayref;
+$dbh->disconnect;
 
 __END__

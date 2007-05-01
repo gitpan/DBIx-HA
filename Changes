@@ -1,5 +1,10 @@
 Revision history for Perl extension DBIx::HA.
 
+1.00 Wed May 02 01:24:00 2007
+  - Made compatible with DBD::Gofer
+  - Added DBIX_HA_DEBUG env var to enable debug at runtime
+  - Increase default connect and execute timeouts to 30 seconds.
+
 0.99 Wed Oct 04 18:18:00 2006
 	- Fix for Apache children always starting at index 0 and
 	  overwriting shared file if under app failover.

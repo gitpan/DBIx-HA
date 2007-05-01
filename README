@@ -1,4 +1,4 @@
-DBIx/HA version 0.97
+DBIx/HA version 1.00
 ====================
 
 DBIx::HA is a High Availability module for DBI. It is implemented by

@@ -9,7 +9,7 @@ package DBIx::HA;
 
 use 5.006000;
 
-use constant DBIx_HA_DEBUG => 0;
+use constant DBIx_HA_DEBUG => $ENV{DBIX_HA_DEBUG} || 0;
 use Data::Dumper;
 use DBI 1.49 ();
 use Sys::SigAction qw( set_sig_handler );
@@ -23,7 +23,7 @@ our $loaded_Apache_DBI = 0;
 our $logdir;
 
 BEGIN {
-	$DBIx::HA::VERSION = 0.99;
+	$DBIx::HA::VERSION = 1.00;
 
 	# Sample Fail Test Functions for different Database Servers
 	# They are used in the configuration 
@@ -58,10 +58,10 @@ sub initialize {
 		}
 		# add default timeouts for connection and execution
 		if (! $DATABASE::conf{$dbname}->{'connecttimeout'}) {
-			$DATABASE::conf{$dbname}->{'connecttimeout'} = 5;
+			$DATABASE::conf{$dbname}->{'connecttimeout'} = 30;
 		}
 		if (! $DATABASE::conf{$dbname}->{'executetimeout'}) {
-			$DATABASE::conf{$dbname}->{'executetimeout'} = 10;
+			$DATABASE::conf{$dbname}->{'executetimeout'} = 30;
 		}
 		# add default failover rule based on DBI error
 		# default is to not request failover, whatever the error
@@ -304,9 +304,8 @@ sub _reconnect {
 						$dbh->swap_inner_handle($newdbh);
 						# wipe the old database handle (which in turn finishes all its children sth's)
 						# If we're using DBD::Sybase, make sure syb_flush_finish is off so we don't get remaining results
-						if ($dbh->{Driver}->{Name} eq 'Sybase') {
-							$newdbh->{syb_flush_finish} = 0;
-						}
+                                                $newdbh->{syb_flush_finish} = 0 if $newdbh->{syb_flush_finish}
+                                                    and $newdbh->{Driver}{Name} ne 'Gofer';
 						eval { undef $newdbh; };
 					} else {
 						# there was no previous active database handle, so that's easy
@@ -347,7 +346,11 @@ sub connect {
 	warn Dumper Apache::DBI::all_handlers() if (DBIx_HA_DEBUG > 1 && $loaded_Apache_DBI);
 	my $class = shift;
 	my $dbname = shift;
-	my ($dsn, $username, $auth, $attrs) = @{$DATABASE::conf{$dbname}->{'active_db'}};
+	my $conf = $DATABASE::conf{$dbname}
+            or Carp::croak("No entry for '$dbname' in %DATABASE::conf");
+	my $active_db = $conf->{'active_db'}
+            or Carp::croak("No active_db for '$dbname' (did you call initialize?)");
+	my ($dsn, $username, $auth, $attrs) = @$active_db;
 
 	# Update the active db. If it's been updated, switch to it
 	if (! _isactivedb($dsn)) {
@@ -394,6 +397,7 @@ sub _connect_with_timeout {
 			warn "$prefix Error in DBI::connect: $@\n" if $@;
 		}
 	}
+        $dbh->{private_dbixha_dsn} = $dsn if $dbh;
 	return $dbh;
 }
 } # end package DBIx::HA
@@ -411,10 +415,15 @@ sub prepare {
 	my $dbh = shift;
 	my $sql = shift;
 	my $sth;
-	my $dsn = 'dbi:'.$dbh->{Driver}->{Name}.':'.$dbh->{Name};
+	my $dsn = $dbh->{private_dbixha_dsn} || die "panic: no private_dbixha_dsn";
 	warn "$prefix in prepare: dsn: $dsn ; sql: $sql \n" if (DBIx_HA_DEBUG > 1);
 	if (DBIx::HA::_isactivedb ($dsn)) {
-		warn "$prefix Statement handle being prepared while existing statement handle still open!\n\tdbh:\t\t$dsn\n\tprevious statement:\t".$dbh->{Statement}."\n\tcurrent statement:\t$sql\n\tACTIVE KIDS: ".$dbh->{ActiveKids}."\n" if ($dbh->{ActiveKids});
+		warn join "\n", "$prefix Statement handle being prepared while existing statement handle still open!",
+                        "\tdbh:\t\t$dsn",
+                        "\tprevious statement:\t".$dbh->{Statement},
+                        "\tcurrent statement:\t$sql",
+                        "\tACTIVE KIDS: ".$dbh->{ActiveKids}."\n"
+                    if $dbh->{ActiveKids};
 	} else {
 		my $dbname = DBIx::HA::_getdbname($dsn);
 		($dsn, $dbh) = DBIx::HA::_reconnect ($dsn, $dbh);
@@ -442,7 +451,7 @@ sub execute {
 	my $sth = shift;
 	my $dbh = $sth->{Database};
 	my $sql = $dbh->{Statement};
-	my $dsn = 'dbi:'.$dbh->{Driver}->{Name}.':'.$dbh->{Name};
+	my $dsn = $dbh->{private_dbixha_dsn} || die "panic: no private_dbixha_dsn";
 	my $dbname = DBIx::HA::_getdbname($dsn);
 	my $res;
 	my $to;	# did we trip a timeout on the execution?
@@ -727,11 +736,11 @@ mod_perl.
 
 =back
 
-=item connecttimeout ( DEFAULT: 5 )
+=item connecttimeout ( DEFAULT: 30 )
 
 timeout for connecting to a datasource, in seconds.
 
-=item executetimeout ( DEFAULT: 10 )
+=item executetimeout ( DEFAULT: 30 )
 
 timeout for execution of a statement, in seconds. If the timeout is triggered,
 the database handle is deleted and a new connect is tried. If the connect

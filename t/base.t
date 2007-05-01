@@ -47,12 +47,14 @@ is (DBIx::HA->initialize(), '', 'initialize()');
 my $dbh = DBIx::HA->connect('test');
 is (ref($dbh), 'DBIx::HA::db', 'connect()');
     
-my $sth = $dbh->prepare(select 1);
+my $sth = $dbh->prepare("select 1");
 is (ref($sth), 'DBIx::HA::st', 'prepare()');
 
 is ($sth->execute, 1, 'execute()');
 is ($DATABASE::conf{'test'}->{'active_db'}, $DATABASE::conf{'test'}->{'db_stack'}->[0], 'primary db active, no failover');
 is ($dbname, 'NONE', 'callback function was not called');
 
+$sth->fetchall_arrayref;
+$dbh->disconnect;
 
 __END__
