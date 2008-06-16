@@ -1,5 +1,11 @@
 Revision history for Perl extension DBIx::HA.
 
+1.10 Mon Jun 16 09:21:32 CDT 2008
+
+  - prepare() now passes $attr through, which allows it to work with drivers
+    like DBD::Gofer. (Tim Bunce)
+  - Numerous documentation improvements (Mark Stosberg)
+
 1.00 Wed May 02 01:24:00 2007
   - Made compatible with DBD::Gofer
   - Added DBIX_HA_DEBUG env var to enable debug at runtime

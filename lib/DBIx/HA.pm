@@ -23,7 +23,7 @@ our $loaded_Apache_DBI = 0;
 our $logdir;
 
 BEGIN {
-	$DBIx::HA::VERSION = 1.00;
+	$DBIx::HA::VERSION = 1.10;
 
 	# Sample Fail Test Functions for different Database Servers
 	# They are used in the configuration 
@@ -70,9 +70,10 @@ sub initialize {
 			$DATABASE::conf{$dbname}->{'failtest_function'} = sub { 0 };
 		}
 		$DATABASE::conf{$dbname}->{'end_of_stack'} = 0;	# error condition reaching end of stack
-		foreach (@{$DATABASE::conf{$dbname}->{'db_stack'}}) {
+		for my $conn_aref (@{$DATABASE::conf{$dbname}->{'db_stack'}}) {
+            my $dsn = $conn_aref->[0];
 			# create an easy reverse-lookup table for finding the db server name from the dsn
-			$DBIx::HA::finddbserver{$_->[0]}  = $dbname;
+			$DBIx::HA::finddbserver{$dsn}  = $dbname;
 			# add timeout when within Apache::DBI
 			# default to no ping (-1)
 			if ($loaded_Apache_DBI) {
@@ -80,8 +81,8 @@ sub initialize {
 					die "$prefix Requirement unmet. Apache::DBI must be at version 0.89 or above";
 				}
 				# create a cached lookup table for finding the Apache::DBI cache key index from the dsn
-				$DBIx::HA::ApacheDBIidx{$_->[0]}  = _getApacheDBIidx(@$_);
-				Apache::DBI->setPingTimeOut($_->[0], $DATABASE::conf{$dbname}->{'pingtimeout'} || -1);
+				$DBIx::HA::ApacheDBIidx{$dsn}  = _getApacheDBIidx(@$conn_aref);
+				Apache::DBI->setPingTimeOut($dsn, $DATABASE::conf{$dbname}->{'pingtimeout'} || -1);
 			}
 		};
 		# set the active database to be the first in the stack
@@ -432,7 +433,7 @@ sub prepare {
 			return undef;
 		}
 	}
-	$sth = $dbh->SUPER::prepare($sql);
+	$sth = $dbh->SUPER::prepare($sql,@_);
 	return $sth;
 }
 	
@@ -501,6 +502,28 @@ sub execute {
 	warn "+++++++++++++++++\n" if (DBIx_HA_DEBUG > 1);
 	return $res;
 }
+
+=begin private
+
+=head2
+
+ ($execute_result,$timeout_triggered) = _execute_with_timeout($dsn,$sth);
+
+Calls "execute" on a DBI statement handle, and handles a possible timeout of the query.
+
+Args:
+ $dsn: a key in our internal lookup table of connection details
+ $sth: DBI statement handle
+
+Returns:
+  - result of execute() call 
+  - boolean, true if timeout was triggered. 
+    
+
+=end private
+
+=cut
+
 
 sub _execute_with_timeout {
 	my $dsn = shift;
@@ -702,15 +725,16 @@ datasource #2 if available.
 
 =item connectoninit ( DEFAULT: 0 )
 
-If set to 1, then during the I<initialize()> phase this database connections
-will be instantiated with its currently  active db_stack entry.
-This is very useful under mod_perl and replaces the C<Apache::DBI>
-I<connect_on_init()> method. 
+If set to 1 and L<Apache::DBI> has already been loaded, then during the
+I<initialize()> phase database connections will be opened with the
+currently active db_stack entry.  This is very useful under mod_perl and
+replaces the purpose of the C<Apache::DBI> I<connect_on_init()> method. 
 
 =item pingtimeout ( DEFAULT: -1 )
 
-this is only useful in conjunction with C<Apache::DBI>. The default of -1
-disables pinging the datasource. It is recommended not to modify it. See
+This configures the usage of the ping method, to validate a connection.  The
+option is only checked if L<Apache::DBI> has already been loaded. The default
+of -1 disables pinging the datasource. It is recommended not to modify it. See
 C<Apache::DBI> for more information on ping timeouts. Timeout is in seconds.
 
 =item failoverlevel ( DEFAULT: process )
@@ -728,24 +752,25 @@ could be potentially hitting a different physical database server.
 
 =item application
 
-a file-based interprocess communication is used to notify Apache/mod_perl
+A file-based interprocess communication is used to notify Apache/mod_perl
 processes of the currently active datasource. This allows all processes to fail
 over near-simultaneously. A process in the middle of an I<execute> will do it
 on the next call to I<prepare> or I<execute>. This is only available under
-mod_perl.
+mod_perl. It only has an effect if we detect that mod_perl is in effect, by
+checking that C<$Apache::VERSION> has a value.
 
 =back
 
 =item connecttimeout ( DEFAULT: 30 )
 
-timeout for connecting to a datasource, in seconds.
+Timeout for connecting to a datasource, in seconds. A value of 0 disables this timeout.
 
 =item executetimeout ( DEFAULT: 30 )
 
-timeout for execution of a statement, in seconds. If the timeout is triggered,
+Timeout for execution of a statement, in seconds. If the timeout is triggered,
 the database handle is deleted and a new connect is tried. If the connect
 succeeds, we assume that the problem is with a runaway SQL statement or bad
-indexing. If the connect fails, then we fail over.
+indexing. If the connect fails, then we fail over. A value of 0 disables this timeout.
 
 =item callback_function ( DEFAULT: I<none> )
 
@@ -754,22 +779,28 @@ failover. See the TIPS sections for a usage example.
 
 =item failtest_function ( DEFAULT: sub{0} )
 
-reference to a function to call to test if a DBI error is a candidate for
-failover or not.
-Input is ($ErrorID, $ErrorString)
+Reference to a function to call to test if a DBI error is a candidate for
+failover or not. This is only triggered when a call to C<execute()> returns
+an undefined value.
+
+Input is ($DBI::err, $DBI::errstr). These correspond to the native driver error
+code and string values. See the docs for your database driver and L<DBI> for
+details.
+
 Output is boolean: If true, then we'll consider the error a critical
 condition, ok to failover. If false, then DBIx::HA will not act on it
 and pass it straight through to the client.
 
 This Fail Test Function (FTF) function is extremely important for the proper
 functioning of DBIx::HA. You must be careful  in defining it
-precisely, based on the database engine that you are using. As a
-convenience to the user, DBIx::HA defines some sample functions that
-you can use. At this time, only the following samples are defined:
+precisely, based on the database engine that you are using. A sample
+function for Sybase is included:
 
- DBIx::HA::FTF_SybaseASE
+  failtest_function   => \&DBIx::HA::FTF_SybaseASE,
 
-Example use is in the synopsis
+To consider any error a reason to failover, you could use the following:
+
+  failtest_function   => sub {1},
 
 =back
 
@@ -880,15 +911,27 @@ bounce Apache.
 =head1 DEPENDENCIES
 
 This modules requires Perl >= 5.6.0, DBI >= 1.49  and Sys::SigAction.
-Apache::DBI is recommended when using mod_perl.
-If using Apache::DBI, version 0.89 or above is required.
-Always load Apache::DBI and Apache before DBIx::HA if you want DBIx::HA to know
-of them.
+
+Apache::DBI is recommended when using mod_perl.  If using Apache::DBI, version 0.89 or above is required.
+Always load Apache::DBI and Apache before DBIx::HA if you want DBIx::HA to know of them.
+
+If using PostgreSQL, use DBD::Pg 2.0 or newer. Older versions of DBD::Pg contain a bug
+which make it incompatible with this module. 
 
 =head1 BUGS
 
 Currently I<%DATABASE::conf> needs to be manually and directly populated.
 A proper interface needs to be built for it.
+
+=head1 URLS
+
+The DBIx::HA project is hosted in Google Code:
+  http://code.google.com/p/perl-dbix-ha/
+
+Please submit bug reports or feature improvements requests to the site above.
+
+The svn repository is also at:
+  https://perl-dbix-ha.googlecode.com/svn/
 
 =head1 SEE ALSO
 

@@ -56,6 +56,15 @@ It also requires DBI >= 1.49
 Apache::DBI is recommended when using mod_perl (v1 only).
 If using Apache::DBI, version 0.89 or above is required.
 
+WEBSITE AND SVN REPOSITORY
+
+The DBIx::HA sourcecode is hosted on Google Code:
+  http://code.google.com/p/perl-dbix-ha/
+
+Please submit bug reports or feature improvements in at the site above.
+The SVN repository can likewise be accessed at:
+  http://perl-dbix-ha.googlecode.com/svn/
+
 COPYRIGHT AND LICENCE
 
 Copyright (C) 2003-2006 Henri Asseily <henri@asseily.com>.
